@@ -1,5 +1,7 @@
-sqlalchemy
+sqlalchemy~=2.0.41
 psycopg2
-pyside6
-pydantic
+pyside6~=6.9.1
+pydantic~=2.11.7
 pydantic-settings
+serial~=0.0.97
+pyserial~=3.5
