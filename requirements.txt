@@ -1,0 +1,5 @@
+sqlalchemy
+psycopg2
+pyside6
+pydantic
+pydantic-settings
