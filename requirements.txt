@@ -3,5 +3,6 @@ psycopg2
 pyside6~=6.9.1
 pydantic~=2.11.7
 pydantic-settings
-serial~=0.0.97
+asyncio~=3.4.3
 pyserial~=3.5
+pyserial-asyncio
