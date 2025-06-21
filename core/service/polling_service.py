@@ -46,7 +46,17 @@ class PollingService:
         try:
             pattern = re.compile(fr"{re.escape(parameter.command)}\s*([+-]?\d+\.\d+)")
             match = pattern.search(frame)
-            return float(match.group(1)) if match else None
+            if not match:
+                return None
+
+            value = float(match.group(1))
+
+            # Специальная обработка для параметра DR
+            if parameter.command == 'DR':
+                value = value / 10
+                self.logger.debug(f"Применено деление на 10 для параметра DR: {value}")
+
+            return value
         except Exception as e:
             self.logger.error(f"Ошибка извлечения параметра {parameter.name}: {e}")
             return None
@@ -56,15 +66,19 @@ class PollingService:
         try:
             for threshold in device.thresholds:
                 if threshold.parameter_id == parameter.id and threshold.is_enable:
-                    if threshold.low_value is not None and value < threshold.low_value:
+                    # Для параметра DR пороги также должны быть поделены на 10
+                    threshold_value = threshold.low_value if parameter.command == 'DR' else threshold.low_value
+                    if threshold_value is not None and value < threshold_value:
                         self.logger.warning(
                             f"ПРЕДУПРЕЖДЕНИЕ: {device.name} {parameter.name} "
-                            f"({value}) ниже минимального порога ({threshold.low_value})"
+                            f"({value}) ниже минимального порога ({threshold_value})"
                         )
-                    if threshold.high_value is not None and value > threshold.high_value:
+
+                    threshold_value = threshold.high_value if parameter.command == 'DR' else threshold.high_value
+                    if threshold_value is not None and value > threshold_value:
                         self.logger.warning(
                             f"ПРЕДУПРЕЖДЕНИЕ: {device.name} {parameter.name} "
-                            f"({value}) выше максимального порога ({threshold.high_value})"
+                            f"({value}) выше максимального порога ({threshold_value})"
                         )
         except Exception as e:
             self.logger.error(f"Ошибка проверки порогов для {parameter.name}: {e}")
@@ -122,8 +136,11 @@ class PollingService:
 
         if self.last_values_cache[device.id].get(parameter.id) != value:
             self.last_values_cache[device.id][parameter.id] = value
+
+            # Форматируем значение для вывода
+            formatted_value = f"{value:.1f}" if parameter.command == 'DR' else str(value)
             self.logger.info(
-                f"{device.name} | {parameter.name}: {value} {parameter.metric or ''}"
+                f"{device.name} | {parameter.name}: {formatted_value} {parameter.metric or ''}"
             )
             await self.check_thresholds(device, parameter, value)
 
