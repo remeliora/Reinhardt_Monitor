@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import re
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from core.model import Device, Parameter
 from infrastructure.db.postgres import PostgresDB
@@ -13,33 +13,26 @@ from infrastructure.db.repositories import (
 
 
 class PollingService:
-    def __init__(self, db: PostgresDB, interval: int = 15):
+    def __init__(self, db: PostgresDB, polling_interval: int = 15):
         self.db = db
-        self.interval = interval
+        self.polling_interval = polling_interval
         self.device_repo = DeviceRepository(db.get_session())
         self.device_type_repo = DeviceTypeRepository(db.get_session())
         self.parameter_repo = ParameterRepository(db.get_session())
         self.logger = logging.getLogger("PollingService")
+        self.active_tasks: List[asyncio.Task] = []
 
-        # Кэш для хранения параметров по типам устройств
-        self.device_parameters_cache: Dict[int, List[Parameter]] = {}
-
-        # Кэш для хранения последних значений параметров
-        self.last_values_cache: Dict[int, Dict[int, float]] = {}
+    async def get_active_devices(self) -> List[Device]:
+        """Получение списка активных устройств из БД"""
+        return self.device_repo.get_devices_by_is_enable_true()
 
     async def get_device_parameters(self, device: Device) -> List[Parameter]:
-        """Получение параметров устройства через его тип с использованием кэша"""
+        """Получение параметров устройства из БД"""
         if not device.device_type_id:
             self.logger.warning(f"Устройство {device.name} не имеет назначенного типа")
             return []
 
-        if device.device_type_id in self.device_parameters_cache:
-            return self.device_parameters_cache[device.device_type_id]
-
-        parameters = self.parameter_repo.get_parameters_by_device_type(device.device_type_id)
-        self.device_parameters_cache[device.device_type_id] = parameters
-        self.logger.info(f"Загружено {len(parameters)} параметров для {device.name}")
-        return parameters
+        return self.parameter_repo.get_parameters_by_device_type(device.device_type_id)
 
     async def extract_parameter_value(self, frame: str, parameter: Parameter) -> Optional[float]:
         """Извлечение значения параметра из фрейма данных"""
@@ -66,37 +59,25 @@ class PollingService:
         try:
             for threshold in device.thresholds:
                 if threshold.parameter_id == parameter.id and threshold.is_enable:
-                    # Для параметра DR пороги также должны быть поделены на 10
-                    threshold_value = threshold.low_value if parameter.command == 'DR' else threshold.low_value
-                    if threshold_value is not None and value < threshold_value:
+                    if threshold.low_value is not None and value < threshold.low_value:
                         self.logger.warning(
                             f"ПРЕДУПРЕЖДЕНИЕ: {device.name} {parameter.name} "
-                            f"({value}) ниже минимального порога ({threshold_value})"
+                            f"({value}) ниже минимального порога ({threshold.low_value})"
                         )
-
-                    threshold_value = threshold.high_value if parameter.command == 'DR' else threshold.high_value
-                    if threshold_value is not None and value > threshold_value:
+                    if threshold.high_value is not None and value > threshold.high_value:
                         self.logger.warning(
                             f"ПРЕДУПРЕЖДЕНИЕ: {device.name} {parameter.name} "
-                            f"({value}) выше максимального порога ({threshold_value})"
+                            f"({value}) выше максимального порога ({threshold.high_value})"
                         )
         except Exception as e:
             self.logger.error(f"Ошибка проверки порогов для {parameter.name}: {e}")
 
-    async def process_device_data(self, device: Device):
-        """Получение и обработка данных от устройства с немедленным закрытием соединения"""
-        ip = device.ip_address
-        port = device.port
-        parameters = await self.get_device_parameters(device)
-
-        if not parameters:
-            self.logger.warning(f"Для устройства {device.name} не найдены параметры")
-            return
-
+    async def poll_device(self, device: Device):
+        """Один цикл опроса устройства"""
         try:
             # Устанавливаем соединение
-            reader, writer = await asyncio.open_connection(ip, port)
-            self.logger.debug(f"Подключено к {device.name} ({ip}:{port})")
+            reader, writer = await asyncio.open_connection(device.ip_address, device.port)
+            self.logger.debug(f"Подключено к {device.name} ({device.ip_address}:{device.port})")
 
             try:
                 # Читаем данные с таймаутом
@@ -104,65 +85,53 @@ class PollingService:
                 frame_str = data.decode('latin1').strip()
                 self.logger.debug(f"Получены данные от {device.name}: {frame_str}")
 
-                # Обрабатываем параметры
-                tasks = []
+                # Получаем актуальные параметры из БД
+                parameters = await self.get_device_parameters(device)
+
+                # Обрабатываем каждый параметр
                 for param in parameters:
-                    tasks.append(
-                        self.process_parameter(frame_str, device, param)
-                    )
-                await asyncio.gather(*tasks)
+                    value = await self.extract_parameter_value(frame_str, param)
+                    if value is not None:
+                        formatted_value = f"{value:.1f}" if param.command == 'DR' else str(value)
+                        # self.logger.info(
+                        #     f"{device.name} | {param.name}: {formatted_value} {param.metric or ''}"
+                        # )
+                        await self.check_thresholds(device, param, value)
 
             except asyncio.TimeoutError:
                 self.logger.warning(f"Таймаут ожидания данных от {device.name}")
             except Exception as e:
                 self.logger.error(f"Ошибка чтения данных от {device.name}: {e}")
             finally:
-                # Всегда закрываем соединение
                 writer.close()
                 await writer.wait_closed()
 
         except Exception as e:
             self.logger.error(f"Ошибка подключения к {device.name}: {e}")
 
-    async def process_parameter(self, frame: str, device: Device, parameter: Parameter):
-        """Обработка одного параметра"""
-        value = await self.extract_parameter_value(frame, parameter)
-        if value is None:
-            return
+    async def poll_all_devices(self):
+        """Один цикл опроса всех активных устройств"""
+        devices = await self.get_active_devices()
+        self.logger.debug(f"Начинаем опрос {len(devices)} устройств")
 
-        # Обновляем кэш и проверяем изменение значения
-        if device.id not in self.last_values_cache:
-            self.last_values_cache[device.id] = {}
+        tasks = []
+        for device in devices:
+            task = asyncio.create_task(self.poll_device(device))
+            tasks.append(task)
 
-        if self.last_values_cache[device.id].get(parameter.id) != value:
-            self.last_values_cache[device.id][parameter.id] = value
-
-            # Форматируем значение для вывода
-            formatted_value = f"{value:.1f}" if parameter.command == 'DR' else str(value)
-            self.logger.info(
-                f"{device.name} | {parameter.name}: {formatted_value} {parameter.metric or ''}"
-            )
-            await self.check_thresholds(device, parameter, value)
-
-    async def poll_device(self, device: Device):
-        """Периодический опрос одного устройства"""
-        while True:
-            try:
-                await self.process_device_data(device)
-            except Exception as e:
-                self.logger.error(f"Ошибка при опросе {device.name}: {e}")
-
-            await asyncio.sleep(self.interval)
+        await asyncio.gather(*tasks)
 
     async def start_polling(self):
         """Запуск периодического опроса всех устройств"""
         try:
-            devices = self.device_repo.get_devices_by_is_enable_true()
-            self.logger.info(f"Найдено {len(devices)} активных устройств")
-
-            tasks = [self.poll_device(device) for device in devices]
-            await asyncio.gather(*tasks)
-
+            while True:
+                await self.poll_all_devices()
+                await asyncio.sleep(self.polling_interval)
+        except asyncio.CancelledError:
+            self.logger.info("Остановка опроса...")
+            # Дожидаемся завершения текущих задач
+            await asyncio.gather(*self.active_tasks, return_exceptions=True)
+            self.logger.info("Опрос остановлен")
         except Exception as e:
-            self.logger.error(f"Ошибка при запуске опроса: {e}")
+            self.logger.error(f"Критическая ошибка: {e}")
             raise
