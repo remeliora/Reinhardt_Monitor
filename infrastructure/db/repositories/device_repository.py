@@ -27,3 +27,10 @@ class DeviceRepository(BaseRepository):
             Device.ip_address == ip,
             Device.port == port
         ).first()
+
+    def get_all_devices(self) -> list[Device]:
+        """Получение всех устройств с предзагрузкой связанных данных"""
+        return self.session.query(Device).options(
+            joinedload(Device.device_type),
+            joinedload(Device.thresholds).joinedload(Threshold.parameter)
+        ).all()

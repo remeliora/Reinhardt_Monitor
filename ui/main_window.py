@@ -3,164 +3,274 @@ import sys
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QPalette, QColor
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QLineEdit, QTextEdit, QFrame
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QTableWidget, QTableWidgetItem, QLineEdit,
+    QTextEdit, QFrame
 )
 
-from edit_window import EditDialog  # Импорт класса окна редактирования
+# ==============================================
+# КОНСТАНТЫ ДЛЯ НАСТРОЙКИ ИНТЕРФЕЙСА
+# (Здесь можно менять цвета, размеры и другие параметры)
+# ==============================================
+APP_NAME = "Reinhardt"
+MAIN_COLOR = "#925FE2"
+SECONDARY_COLOR = "#7E4ED6"
+BG_COLOR = "#E5DFF7"
+TEXT_COLOR = "white"
+TABLE_HEADER_COLOR = MAIN_COLOR
+LOG_BG_COLOR = "#EAEAEA"
+LOG_TEXT_BG = "#F8F8F8"
+
+WINDOW_MIN_WIDTH = 910
+WINDOW_MIN_HEIGHT = 450
+TITLE_BAR_HEIGHT = 40
+BUTTON_HEIGHT = 40
+TABLE_HEIGHT = 180
+LOG_HEIGHT = 220
 
 
+# ==============================================
+# КЛАСС ПАНЕЛИ ЗАГОЛОВКА (можно не менять)
+# ==============================================
 class CustomTitleBar(QWidget):
     def __init__(self, parent):
         super().__init__()
         self.parent = parent
-        self.setFixedHeight(40)
+        self.setFixedHeight(TITLE_BAR_HEIGHT)
 
+        # Настройка цвета фона
         palette = self.palette()
-        palette.setColor(QPalette.Window, QColor("#925FE2"))
+        palette.setColor(QPalette.Window, QColor(MAIN_COLOR))
         self.setPalette(palette)
         self.setAutoFillBackground(True)
 
+        # Основной layout
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 0, 10, 0)
 
-        self.title = QLabel("Reinhardt")
-        self.title.setStyleSheet("color: white; font-weight: bold;")
+        # Название приложения
+        self.title = QLabel(APP_NAME)
+        self.title.setStyleSheet(f"color: {TEXT_COLOR}; font-weight: bold;")
         self.title.setFont(QFont("Arial", 12))
         layout.addWidget(self.title)
         layout.addStretch()
 
-        self.btn_min = QPushButton("—")
-        self.btn_max = QPushButton("▭")
-        self.btn_close = QPushButton("✕")
-
-        for btn in (self.btn_min, self.btn_max, self.btn_close):
-            btn.setFixedSize(30, 30)
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: transparent;
-                    color: white;
-                    font-size: 14px;
-                    border: none;
-                }
-                QPushButton:hover {
-                    background-color: #7E4ED6;
-                }
-            """)
+        # Кнопки управления окном
+        self.btn_min = self._create_title_button("—")
+        self.btn_max = self._create_title_button("▭")
+        self.btn_close = self._create_title_button("✕")
 
         layout.addWidget(self.btn_min)
         layout.addWidget(self.btn_max)
         layout.addWidget(self.btn_close)
 
+        # Подключение событий
         self.btn_min.clicked.connect(self.parent.showMinimized)
         self.btn_max.clicked.connect(self.toggle_max_restore)
         self.btn_close.clicked.connect(self.parent.close)
 
+    def _create_title_button(self, text):
+        """Создает кнопку для панели заголовка"""
+        btn = QPushButton(text)
+        btn.setFixedSize(30, 30)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {TEXT_COLOR};
+                font-size: 14px;
+                border: none;
+            }}
+            QPushButton:hover {{
+                background-color: {SECONDARY_COLOR};
+            }}
+        """)
+        return btn
+
     def toggle_max_restore(self):
+        """Переключение между максимизацией и нормальным режимом"""
         if self.parent.isMaximized():
             self.parent.showNormal()
         else:
             self.parent.showMaximized()
 
 
+# ==============================================
+# ГЛАВНОЕ ОКНО ПРИЛОЖЕНИЯ
+# (Основные изменения для интеграции будут здесь)
+# ==============================================
 class MeteoMonitor(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint)
-        self.setMinimumSize(910, 450)
+        self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.old_pos = None
 
+        # Инициализация UI
+        self.init_ui()
+
+        # TODO: Здесь можно добавить инициализацию сервиса опроса
+        # self.polling_service = PollingService(...)
+
+    def init_ui(self):
+        """Инициализация пользовательского интерфейса"""
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 10)
 
+        # Добавляем кастомную панель заголовка
         self.title_bar = CustomTitleBar(self)
         main_layout.addWidget(self.title_bar)
 
-        content = QHBoxLayout()
-        main_layout.addLayout(content)
+        # Основное содержимое
+        content_layout = QHBoxLayout()
+        main_layout.addLayout(content_layout)
 
-        # Левая панель
-        left_panel_widget = QWidget()
-        left_panel_widget.setStyleSheet("background-color: #E5DFF7;")
-        left_panel = QVBoxLayout()
-        left_panel.setSpacing(15)
+        # Левая панель (меню)
+        self.init_left_panel(content_layout)
 
-        btn_main = QPushButton("Главная")
-        btn_edit = QPushButton("Редактировать")
-        btn_edit.clicked.connect(self.open_edit_dialog)
-        btn_stop = QPushButton("Остановить опрос")
+        # Центральная панель (таблица и лог)
+        self.init_center_panel(content_layout)
 
-        for btn in (btn_main, btn_edit, btn_stop):
-            btn.setFixedHeight(40)
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #925FE2;
-                    color: white;
-                    font-weight: bold;
-                    border-radius: 5px;
-                }
-                QPushButton:hover {
-                    background-color: #7E4ED6;
-                }
-            """)
+    def init_left_panel(self, parent_layout):
+        """Инициализация левой панели с кнопками"""
+        left_panel = QWidget()
+        left_panel.setStyleSheet(f"background-color: {BG_COLOR};")
 
+        layout = QVBoxLayout(left_panel)
+        layout.setSpacing(15)
+
+        # Кнопки управления
+        self.btn_main = self._create_menu_button("Главная")
+        self.btn_edit = self._create_menu_button("Редактировать")
+        self.btn_stop = self._create_menu_button("Остановить опрос")
+
+        # Подключение событий
+        self.btn_edit.clicked.connect(self.open_edit_dialog)
+        self.btn_stop.clicked.connect(self.stop_polling)
+
+        # Поле ввода периода опроса
         lbl_period = QLabel("Период опроса")
         lbl_period.setAlignment(Qt.AlignCenter)
         lbl_period.setFont(QFont("Arial", 11, QFont.Bold))
-        lbl_period.setStyleSheet("""
-            QLabel {
+        lbl_period.setStyleSheet(f"""
+            QLabel {{
                 background-color: #F5F0FF;
-                color: #925FE2;
+                color: {MAIN_COLOR};
                 border-radius: 8px;
                 padding: 6px 10px;
-            }
+            }}
         """)
 
         self.period_input = QLineEdit("10")
         self.period_input.setAlignment(Qt.AlignCenter)
         self.period_input.setFixedHeight(30)
-        self.period_input.setStyleSheet("""
-            QLineEdit {
+        self.period_input.setStyleSheet(f"""
+            QLineEdit {{
                 background-color: #FFFFFF;
-                border: 2px solid #925FE2;
+                border: 2px solid {MAIN_COLOR};
                 border-radius: 5px;
                 padding: 5px;
                 font-weight: bold;
-            }
-            QLineEdit:focus {
-                border-color: #7E4ED6;
-            }
+            }}
+            QLineEdit:focus {{
+                border-color: {SECONDARY_COLOR};
+            }}
         """)
         self.period_input.returnPressed.connect(self.update_polling_period)
 
-        left_panel.addWidget(btn_main)
-        left_panel.addWidget(btn_edit)
-        left_panel.addSpacing(10)
-        left_panel.addWidget(lbl_period)
-        left_panel.addWidget(self.period_input)
-        left_panel.addWidget(btn_stop)
-        left_panel.addStretch()
-        left_panel_widget.setLayout(left_panel)
+        # Добавление виджетов на панель
+        layout.addWidget(self.btn_main)
+        layout.addWidget(self.btn_edit)
+        layout.addSpacing(10)
+        layout.addWidget(lbl_period)
+        layout.addWidget(self.period_input)
+        layout.addWidget(self.btn_stop)
+        layout.addStretch()
 
-        # Центральная панель
-        center_panel = QVBoxLayout()
+        parent_layout.addWidget(left_panel, 1)
 
+    def init_center_panel(self, parent_layout):
+        """Инициализация центральной панели с таблицей и логом"""
+        center_layout = QVBoxLayout()
+
+        # Таблица с данными
+        self.init_data_table(center_layout)
+
+        # Лог событий
+        self.init_event_log(center_layout)
+
+        parent_layout.addLayout(center_layout, 4)
+
+    def init_data_table(self, parent_layout):
+        """Инициализация таблицы с данными датчиков"""
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels([
             "Датчик", "Температура", "Влажность", "Давление",
             "Скорость ветра", "Направление", "CVF"
         ])
-        self.table.setStyleSheet("""
-            QHeaderView::section {
-                background-color: #925FE2;
-                color: white;
+        self.table.setStyleSheet(f"""
+            QHeaderView::section {{
+                background-color: {TABLE_HEADER_COLOR};
+                color: {TEXT_COLOR};
                 font-weight: bold;
-            }
+            }}
         """)
-        self.table.setFixedHeight(180)
+        self.table.setFixedHeight(TABLE_HEIGHT)
         self.table.verticalHeader().setVisible(False)
 
-        data = [
+        # TODO: Заменить тестовые данные на реальные из сервиса опроса
+        self._fill_table_with_test_data()
+
+        parent_layout.addWidget(self.table)
+
+    def init_event_log(self, parent_layout):
+        """Инициализация лога событий"""
+        log_frame = QFrame()
+        log_frame.setFixedHeight(LOG_HEIGHT)
+        log_frame.setStyleSheet(f"""
+            background-color: {LOG_BG_COLOR};
+            border-radius: 15px;
+        """)
+
+        log_layout = QVBoxLayout(log_frame)
+        log_layout.setContentsMargins(10, 10, 10, 10)
+
+        log_label = QLabel("События")
+        log_label.setFont(QFont("Arial", 10, QFont.Bold))
+
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet(f"background-color: {LOG_TEXT_BG}; border: none;")
+
+        # TODO: Заменить тестовые данные на реальные логи
+        self.log_text.setText("\n".join([
+                                            "01.08.2024 10:34:20 Станция контроля метеорологических параметров №2 (ОС2): Температура выше порога: (24.0 > 23.8999996185303)"
+                                        ] * 3))
+
+        log_layout.addWidget(log_label)
+        log_layout.addWidget(self.log_text)
+
+        parent_layout.addWidget(log_frame)
+
+    def _create_menu_button(self, text):
+        """Создает кнопку для меню"""
+        btn = QPushButton(text)
+        btn.setFixedHeight(BUTTON_HEIGHT)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {MAIN_COLOR};
+                color: {TEXT_COLOR};
+                font-weight: bold;
+                border-radius: 5px;
+            }}
+            QPushButton:hover {{
+                background-color: {SECONDARY_COLOR};
+            }}
+        """)
+        return btn
+
+    def _fill_table_with_test_data(self):
+        """Заполнение таблицы тестовыми данными (для демонстрации)"""
+        test_data = [
             ["Reinhardt#1", "20,38", "55,5", "99,165", "---", "---", "---"],
             ["Reinhardt#2", "21,4", "30,23", "99,059", "---", "---", "---"],
             ["Reinhardt#3", "19,02", "64,41", "98,953", "---", "---", "---"],
@@ -168,7 +278,8 @@ class MeteoMonitor(QWidget):
             ["Reinhardt#5", "25,38", "84,21", "98,714", "0", "266,58", "25,38"],
             ["Reinhardt#13", "25,38", "84,21", "98,714", "0", "266,58", "25,38"]
         ]
-        for row_data in data:
+
+        for row_data in test_data:
             row_idx = self.table.rowCount()
             self.table.insertRow(row_idx)
             for col_idx, value in enumerate(row_data):
@@ -176,43 +287,44 @@ class MeteoMonitor(QWidget):
                 item.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_idx, col_idx, item)
 
-        # Лог событий
-        log_frame = QFrame()
-        log_frame.setFixedHeight(220)
-        log_frame.setStyleSheet("""
-            background-color: #EAEAEA;
-            border-radius: 15px;
-        """)
-        log_layout = QVBoxLayout(log_frame)
-        log_label = QLabel("События")
-        log_label.setFont(QFont("Arial", 10, QFont.Bold))
-        log_text = QTextEdit()
-        log_text.setReadOnly(True)
-        log_text.setStyleSheet("background-color: #F8F8F8; border: none;")
-        log_text.setText("\n".join([
-            "01.08.2024 10:34:20 Станция контроля метеорологических параметров №2 (ОС2): Температура выше порога: (24.0 > 23.8999996185303)"
-        ] * 12))
-        log_layout.addWidget(log_label)
-        log_layout.addWidget(log_text)
-
-        center_panel.addWidget(self.table)
-        center_panel.addWidget(log_frame)
-
-        content.addWidget(left_panel_widget, 1)
-        content.addLayout(center_panel, 4)
-
+    # ==============================================
+    # МЕТОДЫ ДЛЯ ИНТЕГРАЦИИ С СЕРВИСОМ ОПРОСА
+    # (Эти методы нужно будет доработать)
+    # ==============================================
     def update_polling_period(self):
+        """Обновление периода опроса"""
         try:
-            value = int(self.period_input.text())
-            print(f"✅ Новый период опроса: {value} сек.")
+            period = int(self.period_input.text())
+            # TODO: Интеграция с сервисом опроса
+            print(f"Установлен новый период опроса: {period} сек.")
+            self._add_log_message(f"Период опроса изменен на {period} сек.")
         except ValueError:
-            print("❌ Введите целое число")
+            self._add_log_message("Ошибка: период опроса должен быть целым числом")
+
+    def stop_polling(self):
+        """Остановка опроса датчиков"""
+        # TODO: Интеграция с сервисом опроса
+        self._add_log_message("Опрос датчиков остановлен")
 
     def open_edit_dialog(self):
-        dialog = EditDialog(self)
-        dialog.exec()
+        """Открытие диалога редактирования"""
+        # TODO: Реализовать диалог редактирования
+        self._add_log_message("Открыто окно редактирования")
 
-    # Перемещение окна
+    def update_sensor_data(self, sensor_name, data):
+        """Обновление данных датчика в таблице"""
+        # TODO: Реализовать обновление данных в таблице
+        # data - словарь с значениями параметров
+        pass
+
+    def _add_log_message(self, message):
+        """Добавление сообщения в лог"""
+        # timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        # self.log_text.append(f"{timestamp} {message}")
+
+    # ==============================================
+    # ОБРАБОТЧИКИ ПЕРЕМЕЩЕНИЯ ОКНА
+    # ==============================================
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.old_pos = event.globalPosition().toPoint()
@@ -227,6 +339,9 @@ class MeteoMonitor(QWidget):
         self.old_pos = None
 
 
+# ==============================================
+# ЗАПУСК ПРИЛОЖЕНИЯ
+# ==============================================
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MeteoMonitor()
