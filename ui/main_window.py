@@ -99,8 +99,9 @@ class CustomTitleBar(QWidget):
 # (Основные изменения для интеграции будут здесь)
 # ==============================================
 class MeteoMonitor(QWidget):
-    def __init__(self):
+    def __init__(self, app):
         super().__init__()
+        self.app = app
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.old_pos = None
