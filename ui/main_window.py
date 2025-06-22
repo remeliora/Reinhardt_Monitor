@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (
     QTextEdit, QFrame, QMessageBox
 )
 
+from ui.edit_window import EditDialog
+
 # ==============================================
 # КОНСТАНТЫ ДЛЯ НАСТРОЙКИ ИНТЕРФЕЙСА
 # (Здесь можно менять цвета, размеры и другие параметры)
@@ -361,6 +363,9 @@ class MeteoMonitor(QWidget):
         """Открытие диалога редактирования"""
         # TODO: Реализовать диалог редактирования
         self._add_log_message("Открыто окно редактирования")
+        # Создаем и показываем диалоговое окно
+        dialog = EditDialog(self)
+        dialog.exec()
 
     def update_sensor_data(self, sensor_name, data):
         """Обновление данных датчика в таблице"""
