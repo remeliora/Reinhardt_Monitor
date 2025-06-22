@@ -1,11 +1,13 @@
 import sys
+from threading import Thread
 
-from PySide6.QtCore import Qt
+import asyncio
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QPalette, QColor
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QLineEdit,
-    QTextEdit, QFrame
+    QTextEdit, QFrame, QMessageBox
 )
 
 # ==============================================
@@ -99,18 +101,23 @@ class CustomTitleBar(QWidget):
 # (Основные изменения для интеграции будут здесь)
 # ==============================================
 class MeteoMonitor(QWidget):
+    data_updated = Signal(dict)
+    log_updated = Signal(str)
+
     def __init__(self, app):
         super().__init__()
         self.app = app
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.old_pos = None
+        self.is_polling_active = False
 
         # Инициализация UI
         self.init_ui()
 
-        # TODO: Здесь можно добавить инициализацию сервиса опроса
-        # self.polling_service = PollingService(...)
+        # Подключение сигналов
+        self.data_updated.connect(self.update_sensor_data)
+        self.log_updated.connect(self._add_log_message)
 
     def init_ui(self):
         """Инициализация пользовательского интерфейса"""
@@ -142,10 +149,13 @@ class MeteoMonitor(QWidget):
         # Кнопки управления
         self.btn_main = self._create_menu_button("Главная")
         self.btn_edit = self._create_menu_button("Редактировать")
+        self.btn_start = self._create_menu_button("Запустить опрос")
         self.btn_stop = self._create_menu_button("Остановить опрос")
+        self.btn_stop.setEnabled(False)
 
         # Подключение событий
         self.btn_edit.clicked.connect(self.open_edit_dialog)
+        self.btn_start.clicked.connect(self.start_polling)
         self.btn_stop.clicked.connect(self.stop_polling)
 
         # Поле ввода периода опроса
@@ -161,7 +171,7 @@ class MeteoMonitor(QWidget):
             }}
         """)
 
-        self.period_input = QLineEdit("10")
+        self.period_input = QLineEdit(str(self.app.polling_service.polling_interval))
         self.period_input.setAlignment(Qt.AlignCenter)
         self.period_input.setFixedHeight(30)
         self.period_input.setStyleSheet(f"""
@@ -184,6 +194,7 @@ class MeteoMonitor(QWidget):
         layout.addSpacing(10)
         layout.addWidget(lbl_period)
         layout.addWidget(self.period_input)
+        layout.addWidget(self.btn_start)
         layout.addWidget(self.btn_stop)
         layout.addStretch()
 
@@ -277,7 +288,7 @@ class MeteoMonitor(QWidget):
             ["Reinhardt#3", "19,02", "64,41", "98,953", "---", "---", "---"],
             ["Reinhardt#4", "17,97", "98,74", "99,104", "10,12", "341,08", "16,58"],
             ["Reinhardt#5", "25,38", "84,21", "98,714", "0", "266,58", "25,38"],
-            ["Reinhardt#13", "25,38", "84,21", "98,714", "0", "266,58", "25,38"]
+            ["Reinhardt#13", "25,38", "84,21", "98,714", "---", "---", "---"]
         ]
 
         for row_data in test_data:
@@ -296,16 +307,55 @@ class MeteoMonitor(QWidget):
         """Обновление периода опроса"""
         try:
             period = int(self.period_input.text())
-            # TODO: Интеграция с сервисом опроса
-            print(f"Установлен новый период опроса: {period} сек.")
+            if period <= 0:
+                raise ValueError("Период должен быть положительным числом")
+
+            # Устанавливаем новый период в сервисе опроса
+            self.app.polling_service.polling_interval = period
             self._add_log_message(f"Период опроса изменен на {period} сек.")
-        except ValueError:
-            self._add_log_message("Ошибка: период опроса должен быть целым числом")
+        except ValueError as e:
+            QMessageBox.warning(self, "Ошибка", "Период опроса должен быть положительным целым числом")
+            self.period_input.setText(str(self.app.polling_service.polling_interval))
+
+    def start_polling(self):
+        """Запуск опроса датчиков"""
+        if not self.is_polling_active:
+            try:
+                self.app.run_polling_service()
+                self.is_polling_active = True
+                self.btn_start.setEnabled(False)
+                self.btn_stop.setEnabled(True)
+                self._add_log_message("Опрос датчиков запущен")
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось запустить опрос: {str(e)}")
 
     def stop_polling(self):
         """Остановка опроса датчиков"""
-        # TODO: Интеграция с сервисом опроса
-        self._add_log_message("Опрос датчиков остановлен")
+        if self.is_polling_active:
+            try:
+                # Запускаем остановку в отдельном потоке, чтобы не блокировать GUI
+                Thread(
+                    target=self._async_stop_polling,
+                    daemon=True
+                ).start()
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось остановить опрос: {str(e)}")
+
+    def _async_stop_polling(self):
+        """Асинхронная остановка опроса (выполняется в отдельном потоке)"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self.app.stop_polling_service())
+            self.log_updated.emit("Опрос датчиков остановлен")
+            self.is_polling_active = False
+            # Обновляем кнопки в основном потоке через сигнал
+            self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(False)
+        except Exception as e:
+            self.log_updated.emit(f"Ошибка при остановке опроса: {str(e)}")
+        finally:
+            loop.close()
 
     def open_edit_dialog(self):
         """Открытие диалога редактирования"""

@@ -3,8 +3,8 @@ import json
 import logging
 import os
 import re
-from typing import List, Optional, Dict, Any
 from datetime import datetime
+from typing import List, Optional, Dict, Any
 
 from core.model import Device, Parameter
 from infrastructure.db.postgres import PostgresDB
@@ -18,16 +18,32 @@ from infrastructure.db.repositories import (
 class PollingService:
     def __init__(self, db: PostgresDB, polling_interval: int = 15, output_dir: str = "device_data"):
         self.db = db
-        self.polling_interval = polling_interval
+        self._polling_interval = polling_interval
         self.output_dir = output_dir
         self.device_repo = DeviceRepository(db.get_session())
         self.device_type_repo = DeviceTypeRepository(db.get_session())
         self.parameter_repo = ParameterRepository(db.get_session())
         self.logger = logging.getLogger("PollingService")
         self.active_tasks: List[asyncio.Task] = []
+        self._is_running = False
+        self._polling_task: Optional[asyncio.Task] = None
+        self._polling_event = asyncio.Event()
 
         # Создаем директорию для хранения данных, если ее нет
         os.makedirs(self.output_dir, exist_ok=True)
+
+    @property
+    def polling_interval(self) -> int:
+        """Получить текущий интервал опроса"""
+        return self._polling_interval
+
+    @polling_interval.setter
+    def polling_interval(self, value: int):
+        """Установить новый интервал опроса и уведомить цикл опроса"""
+        if value <= 0:
+            raise ValueError("Интервал опроса должен быть положительным числом")
+        self._polling_interval = value
+        self._polling_event.set()  # Прерываем sleep для применения нового интервала
 
     async def get_active_devices(self) -> List[Device]:
         """Получение списка активных устройств из БД"""
@@ -67,7 +83,6 @@ class PollingService:
             filename = f"{self.output_dir}/{device.name.replace(' ', '_')}.json"
             data = {
                 "device_name": device.name,
-                # "is_enabled": device.is_enable,
                 "ip_address": device.ip_address,
                 "port": device.port,
                 "last_update": datetime.now().isoformat(),
@@ -159,25 +174,80 @@ class PollingService:
         for device in devices:
             task = asyncio.create_task(self.poll_device(device))
             tasks.append(task)
+            self.active_tasks.append(task)
 
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.active_tasks = []
 
     async def start_polling(self):
         """Запуск периодического опроса всех устройств"""
+        if self._is_running:
+            self.logger.warning("Опрос уже запущен")
+            return
+
+        self._is_running = True
+        self._polling_event.clear()
+
         try:
-            while True:
+            while self._is_running:
                 start_time = datetime.now()
                 await self.poll_all_devices()
 
                 # Рассчитываем время до следующего опроса
                 elapsed = (datetime.now() - start_time).total_seconds()
                 sleep_time = max(0, self.polling_interval - elapsed)
-                await asyncio.sleep(sleep_time)
+
+                try:
+                    # Используем событие для прерывания sleep при изменении интервала
+                    await asyncio.wait_for(self._polling_event.wait(), timeout=sleep_time)
+                    self._polling_event.clear()  # Сбрасываем событие для следующего цикла
+                except asyncio.TimeoutError:
+                    pass  # Нормальное завершение sleep
 
         except asyncio.CancelledError:
-            self.logger.info("Остановка опроса...")
-            await asyncio.gather(*self.active_tasks, return_exceptions=True)
-            self.logger.info("Опрос остановлен")
+            self.logger.info("Получен запрос на остановку опроса...")
         except Exception as e:
             self.logger.error(f"Критическая ошибка: {e}")
             raise
+        finally:
+            self._is_running = False
+            # Отменяем все активные задачи
+            await self.stop_polling()
+            self.logger.info("Опрос полностью остановлен")
+
+    async def stop_polling(self):
+        """Корректная остановка опроса"""
+        self._is_running = False
+        self._polling_event.set()  # Прерываем sleep
+
+        # Отменяем все активные задачи
+        for task in self.active_tasks:
+            if not task.done():
+                task.cancel()
+
+        # Дожидаемся завершения всех задач
+        if self.active_tasks:
+            try:
+                await asyncio.gather(*self.active_tasks)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                self.logger.error(f"Ошибка при отмене задач: {e}")
+            finally:
+                self.active_tasks = []
+
+        # Отменяем основную задачу опроса
+        if self._polling_task and not self._polling_task.done():
+            self._polling_task.cancel()
+            try:
+                await self._polling_task
+            except asyncio.CancelledError:
+                pass
+
+    async def run(self):
+        """Запуск сервиса опроса"""
+        self._polling_task = asyncio.create_task(self.start_polling())
+        try:
+            await self._polling_task
+        except asyncio.CancelledError:
+            await self.stop_polling()

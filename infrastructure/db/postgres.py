@@ -38,5 +38,17 @@ class PostgresDB:
             session.commit()  # Подтверждаем транзакцию
             return True
         except Exception as e:
-            print(f"Ошибка подключения к базе данных: {e}")
+            # print(f"Ошибка подключения к базе данных: {e}")
             return False
+
+    def close_connection(self):
+        """
+                Корректное закрытие соединения с базой данных.
+                Закрывает пул соединений и освобождает ресурсы.
+                """
+        try:
+            if hasattr(self, 'engine') and self.engine is not None:
+                self.engine.dispose()
+                # self.logger.info("Соединение с базой данных успешно закрыто")
+        except Exception as e:
+            print(f"Ошибка при закрытии соединения с БД: {e}")
