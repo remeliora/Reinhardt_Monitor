@@ -89,20 +89,18 @@ class Application:
 
     def _run_async_polling(self):
         """Запуск асинхронного опроса в отдельном потоке"""
-        self._polling_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._polling_loop)
-
         try:
-            self._polling_loop.run_until_complete(
-                self.polling_service.run()
-            )
+            self._polling_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._polling_loop)
+            self._polling_loop.run_until_complete(self.polling_service.run())
         except Exception as e:
             self.logger.error(f"Ошибка в сервисе опроса: {e}")
         finally:
             self._is_polling_active = False
-            if self._polling_loop.is_running():
-                self._polling_loop.stop()
-            self._polling_loop.close()
+            if self._polling_loop is not None:
+                if self._polling_loop.is_running():
+                    self._polling_loop.stop()
+                self._polling_loop.close()
             self._polling_loop = None
 
     async def stop_polling_service(self):
@@ -112,14 +110,13 @@ class Application:
 
         self.logger.info("Остановка сервиса опроса...")
         try:
-            if self._polling_loop is not None:
+            if self._polling_loop is not None and not self._polling_loop.is_closed():
                 future = asyncio.run_coroutine_threadsafe(
                     self.polling_service.stop_polling(),
                     self._polling_loop
                 )
                 future.result(timeout=5.0)
             self.logger.info("Сервис опроса остановлен")
-            self._is_polling_active = False
         except asyncio.TimeoutError:
             self.logger.warning("Таймаут при остановке сервиса опроса")
         except Exception as e:

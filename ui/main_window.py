@@ -400,6 +400,6 @@ class MeteoMonitor(QWidget):
 # ==============================================
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MeteoMonitor()
+    window = MeteoMonitor(app)
     window.show()
     sys.exit(app.exec())

@@ -27,9 +27,8 @@ class PollingService:
         self.active_tasks: List[asyncio.Task] = []
         self._is_running = False
         self._polling_task: Optional[asyncio.Task] = None
-        self._polling_event = asyncio.Event()
+        # Убрали создание Event здесь, будем создавать его при запуске
 
-        # Создаем директорию для хранения данных, если ее нет
         os.makedirs(self.output_dir, exist_ok=True)
 
     @property
@@ -245,9 +244,43 @@ class PollingService:
                 pass
 
     async def run(self):
-        """Запуск сервиса опроса"""
-        self._polling_task = asyncio.create_task(self.start_polling())
+        """Запуск периодического опроса всех устройств"""
+        if self._is_running:
+            self.logger.warning("Опрос уже запущен")
+            return
+
+        self._is_running = True
+        self._polling_event = asyncio.Event()  # Создаем новый Event для текущего loop
+        self._polling_event.clear()
+
         try:
-            await self._polling_task
+            while self._is_running:
+                start_time = datetime.now()
+                await self.poll_all_devices()
+
+                elapsed = (datetime.now() - start_time).total_seconds()
+                sleep_time = max(0, self.polling_interval - elapsed)
+
+                try:
+                    await asyncio.wait_for(self._polling_event.wait(), timeout=sleep_time)
+                    self._polling_event.clear()
+                except asyncio.TimeoutError:
+                    pass
+
         except asyncio.CancelledError:
+            self.logger.info("Получен запрос на остановку опроса...")
+        except Exception as e:
+            self.logger.error(f"Критическая ошибка: {e}")
+            raise
+        finally:
+            self._is_running = False
             await self.stop_polling()
+            self.logger.info("Опрос полностью остановлен")
+
+    async def cleanup(self):
+        """Очистка ресурсов"""
+        self._is_running = False
+        if hasattr(self, '_polling_event'):
+            del self._polling_event
+        if self._polling_task and not self._polling_task.done():
+            self._polling_task.cancel()
