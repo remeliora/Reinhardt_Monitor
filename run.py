@@ -7,22 +7,9 @@ from typing import Optional
 from PySide6.QtWidgets import QApplication
 
 from core.service.polling_service import PollingService
-from ui.main_window import MeteoMonitor
+from ui.main_window import MeteoMonitor, GUILogHandler
 from infrastructure.config.config import settings
 from infrastructure.db.postgres import PostgresDB
-
-
-def setup_logging():
-    """Настройка системы логирования"""
-    level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(settings.LOG_FILE, encoding="utf-8")
-        ],
-    )
 
 
 class Application:
@@ -36,6 +23,47 @@ class Application:
         self._polling_loop: Optional[asyncio.AbstractEventLoop] = None
         self._stop_event = asyncio.Event()
         self._is_polling_active = False
+
+        # Инициализируем QApplication
+        self.app = QApplication(sys.argv)
+
+        # Настраиваем логирование (пока без GUI обработчика)
+        self.setup_logging(include_gui_handler=False)
+
+        self.logger.info("Приложение инициализировано")
+
+    def setup_logging(self, include_gui_handler=True):
+        """Настройка системы логирования"""
+        level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+
+        # Очищаем существующие обработчики
+        logging.getLogger().handlers = []
+
+        # Создаем форматтер
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+
+        # Консольный обработчик
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+
+        # Файловый обработчик
+        file_handler = logging.FileHandler(settings.LOG_FILE, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+
+        # Настраиваем корневой логгер
+        root_logger = logging.getLogger()
+        root_logger.setLevel(level)
+        root_logger.addHandler(console_handler)
+        root_logger.addHandler(file_handler)
+
+        # GUI обработчик добавляем только после инициализации GUI
+        if include_gui_handler and self.gui:
+            gui_handler = GUILogHandler(self.gui.log_updated)
+            gui_handler.setFormatter(formatter)
+            root_logger.addHandler(gui_handler)
 
     def initialize_db(self) -> bool:
         """Инициализация подключения к базе данных"""
@@ -127,14 +155,16 @@ class Application:
     def initialize_gui(self):
         """Инициализация графического интерфейса"""
         try:
-            app = QApplication(sys.argv)
             self.gui = MeteoMonitor(self)
             self.gui.closeEvent = self.on_gui_close
-            self.gui.show()
-            self.logger.info("Графический интерфейс инициализирован")
-            sys.exit(app.exec())
+
+            # Теперь добавляем GUI обработчик в логирование
+            self.setup_logging(include_gui_handler=True)
+
+            # self.logger.info("Графический интерфейс инициализирован")
         except Exception as e:
             self.logger.critical(f"Ошибка инициализации GUI: {e}")
+            raise
 
     def on_gui_close(self, event):
         """Обработчик закрытия главного окна"""
@@ -159,7 +189,6 @@ class Application:
 
     def run(self):
         """Основной метод запуска приложения"""
-        setup_logging()
         self.logger.info("Запуск приложения")
 
         if not self.initialize_db():
@@ -168,8 +197,14 @@ class Application:
         if not self.initialize_polling_service():
             return
 
-        # Инициализируем GUI без автоматического запуска опроса
+        # Инициализируем GUI
         self.initialize_gui()
+
+        # Показываем главное окно
+        self.gui.show()
+
+        # Запускаем цикл событий
+        sys.exit(self.app.exec())
 
     def is_polling_active(self) -> bool:
         """Проверка активности опроса"""

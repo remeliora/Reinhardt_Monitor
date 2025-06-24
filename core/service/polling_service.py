@@ -117,9 +117,9 @@ class PollingService:
                     value = await self.extract_parameter_value(frame_str, param)
                     if value is not None:
                         formatted_value = float(f"{value:.1f}") if param.command == 'DR' else value
-                        self.logger.info(
-                            f"{device.name} | {param.name}: {formatted_value} {param.metric or ''}"
-                        )
+                        # self.logger.info(
+                        #     f"{device.name} | {param.name}: {formatted_value} {param.metric or ''}"
+                        # )
 
                         param_data = {
                             "name": param.name,
@@ -167,7 +167,7 @@ class PollingService:
     async def poll_all_devices(self):
         """Один цикл опроса всех активных устройств"""
         devices = await self.get_active_devices()
-        self.logger.info(f"Начинаем опрос {len(devices)} устройств")
+        # self.logger.info(f"Начинаем опрос {len(devices)} устройств")
 
         tasks = []
         for device in devices:

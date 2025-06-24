@@ -1,3 +1,4 @@
+import logging
 import sys
 from threading import Thread
 
@@ -102,6 +103,17 @@ class CustomTitleBar(QWidget):
 # ГЛАВНОЕ ОКНО ПРИЛОЖЕНИЯ
 # (Основные изменения для интеграции будут здесь)
 # ==============================================
+
+class GUILogHandler(logging.Handler):
+    def __init__(self, log_signal):
+        super().__init__()
+        self.log_signal = log_signal
+
+    def emit(self, record):
+        log_entry = self.format(record)
+        self.log_signal.emit(log_entry)
+
+
 class MeteoMonitor(QWidget):
     data_updated = Signal(dict)
     log_updated = Signal(str)
@@ -253,12 +265,11 @@ class MeteoMonitor(QWidget):
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setStyleSheet(f"background-color: {LOG_TEXT_BG}; border: none;")
-
-        # TODO: Заменить тестовые данные на реальные логи
-        self.log_text.setText("\n".join([
-                                            "01.08.2024 10:34:20 Станция контроля метеорологических параметров №2 (ОС2): Температура выше порога: (24.0 > 23.8999996185303)"
-                                        ] * 3))
+        self.log_text.setStyleSheet(f"""
+            background-color: {LOG_TEXT_BG}; 
+            border: none;
+            font-family: Consolas, monospace;
+        """)
 
         log_layout.addWidget(log_label)
         log_layout.addWidget(self.log_text)
@@ -327,7 +338,7 @@ class MeteoMonitor(QWidget):
                 self.is_polling_active = True
                 self.btn_start.setEnabled(False)
                 self.btn_stop.setEnabled(True)
-                self._add_log_message("Опрос датчиков запущен")
+                # self._add_log_message("Опрос датчиков запущен")
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Не удалось запустить опрос: {str(e)}")
 
@@ -349,7 +360,7 @@ class MeteoMonitor(QWidget):
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(self.app.stop_polling_service())
-            self.log_updated.emit("Опрос датчиков остановлен")
+            # self.log_updated.emit("Опрос датчиков остановлен")
             self.is_polling_active = False
             # Обновляем кнопки в основном потоке через сигнал
             self.btn_start.setEnabled(True)
@@ -361,8 +372,7 @@ class MeteoMonitor(QWidget):
 
     def open_edit_dialog(self):
         """Открытие диалога редактирования"""
-        # TODO: Реализовать диалог редактирования
-        self._add_log_message("Открыто окно редактирования")
+        # self._add_log_message("Открыто окно редактирования")
         # Создаем и показываем диалоговое окно
         dialog = EditDialog(self)
         dialog.exec()
@@ -375,8 +385,17 @@ class MeteoMonitor(QWidget):
 
     def _add_log_message(self, message):
         """Добавление сообщения в лог"""
-        # timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        # self.log_text.append(f"{timestamp} {message}")
+        # Ограничиваем количество строк в логе
+        max_lines = 1000
+        if self.log_text.document().lineCount() > max_lines:
+            cursor = self.log_text.textCursor()
+            cursor.movePosition(cursor.Start)
+            cursor.select(cursor.LineUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()  # Удаляем символ новой строки
+
+        self.log_text.append(message)
+        self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     # ==============================================
     # ОБРАБОТЧИКИ ПЕРЕМЕЩЕНИЯ ОКНА
