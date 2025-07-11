@@ -1,21 +1,21 @@
+import json
 import logging
 import sys
+from pathlib import Path
 from threading import Thread
-
 import asyncio
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QPalette, QColor
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QLineEdit,
-    QTextEdit, QFrame, QMessageBox
+    QTextEdit, QFrame, QMessageBox, QDialog
 )
 
 from ui.edit_window import EditDialog
 
 # ==============================================
 # КОНСТАНТЫ ДЛЯ НАСТРОЙКИ ИНТЕРФЕЙСА
-# (Здесь можно менять цвета, размеры и другие параметры)
 # ==============================================
 APP_NAME = "Reinhardt"
 MAIN_COLOR = "#925FE2"
@@ -34,13 +34,27 @@ TABLE_HEIGHT = 180
 LOG_HEIGHT = 220
 
 
-# ==============================================
-# КЛАСС ПАНЕЛИ ЗАГОЛОВКА (можно не менять)
-# ==============================================
+def _create_title_button(text):
+    """Создает кнопку для панели заголовка"""
+    btn = QPushButton(text)
+    btn.setFixedSize(30, 30)
+    btn.setStyleSheet(f"""
+        QPushButton {{
+            background-color: transparent;
+            color: {TEXT_COLOR};
+            font-size: 14px;
+            border: none;
+        }}
+        QPushButton:hover {{
+            background-color: {SECONDARY_COLOR};
+        }}
+    """)
+    return btn
+
+
 class CustomTitleBar(QWidget):
-    def __init__(self, parent):
-        super().__init__()
-        self.parent = parent
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.setFixedHeight(TITLE_BAR_HEIGHT)
 
         # Настройка цвета фона
@@ -61,48 +75,27 @@ class CustomTitleBar(QWidget):
         layout.addStretch()
 
         # Кнопки управления окном
-        self.btn_min = self._create_title_button("—")
-        self.btn_max = self._create_title_button("▭")
-        self.btn_close = self._create_title_button("✕")
+        self.btn_min = _create_title_button("—")
+        self.btn_max = _create_title_button("▭")
+        self.btn_close = _create_title_button("✕")
 
         layout.addWidget(self.btn_min)
         layout.addWidget(self.btn_max)
         layout.addWidget(self.btn_close)
 
         # Подключение событий
-        self.btn_min.clicked.connect(self.parent.showMinimized)
-        self.btn_max.clicked.connect(self.toggle_max_restore)
-        self.btn_close.clicked.connect(self.parent.close)
-
-    def _create_title_button(self, text):
-        """Создает кнопку для панели заголовка"""
-        btn = QPushButton(text)
-        btn.setFixedSize(30, 30)
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent;
-                color: {TEXT_COLOR};
-                font-size: 14px;
-                border: none;
-            }}
-            QPushButton:hover {{
-                background-color: {SECONDARY_COLOR};
-            }}
-        """)
-        return btn
+        if parent is not None:
+            self.btn_min.clicked.connect(parent.showMinimized)
+            self.btn_max.clicked.connect(self.toggle_max_restore)
+            self.btn_close.clicked.connect(parent.close)
 
     def toggle_max_restore(self):
         """Переключение между максимизацией и нормальным режимом"""
-        if self.parent.isMaximized():
-            self.parent.showNormal()
+        if self.parent().isMaximized():
+            self.parent().showNormal()
         else:
-            self.parent.showMaximized()
+            self.parent().showMaximized()
 
-
-# ==============================================
-# ГЛАВНОЕ ОКНО ПРИЛОЖЕНИЯ
-# (Основные изменения для интеграции будут здесь)
-# ==============================================
 
 class GUILogHandler(logging.Handler):
     def __init__(self, log_signal):
@@ -115,8 +108,8 @@ class GUILogHandler(logging.Handler):
 
 
 class MeteoMonitor(QWidget):
-    data_updated = Signal(dict)
     log_updated = Signal(str)
+    update_triggered = Signal()  # Новый сигнал для обновления данных
 
     def __init__(self, app):
         super().__init__()
@@ -125,13 +118,36 @@ class MeteoMonitor(QWidget):
         self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.old_pos = None
         self.is_polling_active = False
+        self.update_timer = QTimer(self)  # Таймер для автоматического обновления
 
         # Инициализация UI
         self.init_ui()
 
         # Подключение сигналов
-        self.data_updated.connect(self.update_sensor_data)
         self.log_updated.connect(self._add_log_message)
+        self.update_triggered.connect(self.update_all_sensors)
+
+        # Настройка таймера обновления
+        self.setup_update_timer()
+
+        # Первоначальная загрузка данных
+        self.update_all_sensors()
+
+    def setup_update_timer(self):
+        """Настраивает таймер для автоматического обновления данных"""
+        self.update_timer.timeout.connect(self.update_all_sensors)
+        self.start_auto_update()
+
+    def start_auto_update(self):
+        """Запускает автоматическое обновление с текущим интервалом"""
+        interval = self.app.polling_service.polling_interval * 1000  # в миллисекундах
+        self.update_timer.start(interval)
+        self._add_log_message(f"Автообновление данных каждые {self.app.polling_service.polling_interval} сек.")
+
+    def stop_auto_update(self):
+        """Останавливает автоматическое обновление"""
+        self.update_timer.stop()
+        self._add_log_message("Автообновление данных остановлено")
 
     def init_ui(self):
         """Инициализация пользовательского интерфейса"""
@@ -161,7 +177,6 @@ class MeteoMonitor(QWidget):
         layout.setSpacing(15)
 
         # Кнопки управления
-        self.btn_main = self._create_menu_button("Главная")
         self.btn_edit = self._create_menu_button("Редактировать")
         self.btn_start = self._create_menu_button("Запустить опрос")
         self.btn_stop = self._create_menu_button("Остановить опрос")
@@ -203,7 +218,6 @@ class MeteoMonitor(QWidget):
         self.period_input.returnPressed.connect(self.update_polling_period)
 
         # Добавление виджетов на панель
-        layout.addWidget(self.btn_main)
         layout.addWidget(self.btn_edit)
         layout.addSpacing(10)
         layout.addWidget(lbl_period)
@@ -230,22 +244,59 @@ class MeteoMonitor(QWidget):
         """Инициализация таблицы с данными датчиков"""
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels([
-            "Датчик", "Температура", "Влажность", "Давление",
-            "Скорость ветра", "Направление", "CVF"
+            "Датчик", "Температура (°С)", "Влажность (%)", "Давление (kPa)",
+            "Скорость ветра (km/h)", "Направление (°)", "Коэф. охлаждения (°С)"
         ])
         self.table.setStyleSheet(f"""
-            QHeaderView::section {{
-                background-color: {TABLE_HEADER_COLOR};
-                color: {TEXT_COLOR};
-                font-weight: bold;
-            }}
-        """)
+                QTableWidget {{
+                    border: 1px solid {MAIN_COLOR};
+                }}
+                QHeaderView::section {{
+                    background-color: {TABLE_HEADER_COLOR};
+                    color: {TEXT_COLOR};
+                    font-weight: bold;
+                    padding: 5px;
+                }}
+                QScrollBar:vertical {{
+                    border: none;
+                    background: {BG_COLOR};
+                    width: 8px;
+                    margin: 0px 0px 0px 0px;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: {MAIN_COLOR};
+                    min-height: 20px;
+                    border-radius: 4px;
+                }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                    height: 0px;
+                    background: none;
+                }}
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                    background: none;
+                }}
+                QScrollBar:horizontal {{
+                    border: none;
+                    background: {BG_COLOR};
+                    height: 8px;
+                    margin: 0px 0px 0px 0px;
+                }}
+                QScrollBar::handle:horizontal {{
+                    background: {MAIN_COLOR};
+                    min-width: 20px;
+                    border-radius: 4px;
+                }}
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                    width: 0px;
+                    background: none;
+                }}
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                    background: none;
+                }}
+            """)
+
         self.table.setFixedHeight(TABLE_HEIGHT)
         self.table.verticalHeader().setVisible(False)
-
-        # TODO: Заменить тестовые данные на реальные из сервиса опроса
-        self._fill_table_with_test_data()
-
         parent_layout.addWidget(self.table)
 
     def init_event_log(self, parent_layout):
@@ -266,15 +317,48 @@ class MeteoMonitor(QWidget):
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setStyleSheet(f"""
-            background-color: {LOG_TEXT_BG}; 
-            border: none;
-            font-family: Consolas, monospace;
-        """)
+                QTextEdit {{
+                    background-color: {LOG_TEXT_BG}; 
+                    border: none;
+                    font-family: Consolas, monospace;
+                }}
+                QScrollBar:vertical {{
+                    border: none;
+                    background: {LOG_BG_COLOR};
+                    width: 8px;
+                    margin: 0px 0px 0px 0px;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: {MAIN_COLOR};
+                    min-height: 20px;
+                    border-radius: 4px;
+                }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                    height: 0px;
+                    background: none;
+                }}
+                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                    background: none;
+                }}
+            """)
 
         log_layout.addWidget(log_label)
         log_layout.addWidget(self.log_text)
 
         parent_layout.addWidget(log_frame)
+
+    def open_edit_dialog(self):
+        """Открывает диалоговое окно редактирования станций"""
+        try:
+            dialog = EditDialog(self)
+
+            if dialog.exec() == QDialog.Accepted:
+                self._add_log_message("Изменения в настройках станций сохранены")
+                self.update_all_sensors()
+        except Exception as e:
+            error_msg = f"Ошибка при открытии окна редактирования: {str(e)}"
+            self._add_log_message(error_msg)
+            QMessageBox.critical(self, "Ошибка", error_msg)
 
     def _create_menu_button(self, text):
         """Создает кнопку для меню"""
@@ -293,39 +377,87 @@ class MeteoMonitor(QWidget):
         """)
         return btn
 
-    def _fill_table_with_test_data(self):
-        """Заполнение таблицы тестовыми данными (для демонстрации)"""
-        test_data = [
-            ["Reinhardt#1", "20,38", "55,5", "99,165", "---", "---", "---"],
-            ["Reinhardt#2", "21,4", "30,23", "99,059", "---", "---", "---"],
-            ["Reinhardt#3", "19,02", "64,41", "98,953", "---", "---", "---"],
-            ["Reinhardt#4", "17,97", "98,74", "99,104", "10,12", "341,08", "16,58"],
-            ["Reinhardt#5", "25,38", "84,21", "98,714", "0", "266,58", "25,38"],
-            ["Reinhardt#13", "25,38", "84,21", "98,714", "---", "---", "---"]
-        ]
+    def load_sensor_data(self, sensor_name):
+        """Загружает данные датчика из JSON-файла"""
+        try:
+            file_path = Path(__file__).parent.parent / "device_data" / f"{sensor_name}.json"
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            self.log_updated.emit(f"Ошибка загрузки данных датчика {sensor_name}: {str(e)}")
+            return None
 
-        for row_data in test_data:
-            row_idx = self.table.rowCount()
-            self.table.insertRow(row_idx)
-            for col_idx, value in enumerate(row_data):
-                item = QTableWidgetItem(value)
-                item.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(row_idx, col_idx, item)
+    def _get_sensor_files(self):
+        """Возвращает список файлов с данными датчиков"""
+        sensor_dir = Path(__file__).parent.parent / "device_data"
+        return list(sensor_dir.glob("Reinhardt#*.json"))
 
-    # ==============================================
-    # МЕТОДЫ ДЛЯ ИНТЕГРАЦИИ С СЕРВИСОМ ОПРОСА
-    # (Эти методы нужно будет доработать)
-    # ==============================================
+    def update_all_sensors(self):
+        """Обновляет данные всех датчиков"""
+        sensor_files = self._get_sensor_files()
+        for sensor_file in sensor_files:
+            sensor_name = sensor_file.stem
+            data = self.load_sensor_data(sensor_name)
+            if data:
+                self.update_sensor_data(sensor_name, data, True)
+
+    def update_sensor_data(self, sensor_name: str, data: dict, is_enabled: bool):
+        """Обновление данных датчика в таблице"""
+        # Ищем датчик в таблице
+        row_found = -1
+        for row in range(self.table.rowCount()):
+            if self.table.item(row, 0).text() == sensor_name:
+                row_found = row
+                break
+
+        # Если датчик не найден, добавляем новую строку
+        if row_found == -1:
+            row_found = self.table.rowCount()
+            self.table.insertRow(row_found)
+            self.table.setItem(row_found, 0, self._create_table_item(sensor_name))
+            for col in range(1, self.table.columnCount()):
+                self.table.setItem(row_found, col, self._create_table_item("---"))
+
+        # Устанавливаем стиль строки в зависимости от статуса
+        color = QColor(240, 240, 240) if not is_enabled else QColor(255, 255, 255)
+        for col in range(self.table.columnCount()):
+            item = self.table.item(row_found, col)
+            item.setBackground(color)
+
+            if not is_enabled and col > 0:
+                item.setText("---")
+
+        # Обновляем данные только для включенных устройств
+        if is_enabled and data.get("parameters"):
+            params = data["parameters"]
+            self.table.item(row_found, 1).setText(str(params.get("Temperature", {}).get("value", "---")))
+            self.table.item(row_found, 2).setText(str(params.get("Humidity", {}).get("value", "---")))
+            self.table.item(row_found, 3).setText(str(params.get("Pressure", {}).get("value", "---")))
+            self.table.item(row_found, 4).setText(str(params.get("Wind speed", {}).get("value", "---")))
+            self.table.item(row_found, 5).setText(str(params.get("Wind direction", {}).get("value", "---")))
+            self.table.item(row_found, 6).setText(str(params.get("Cooling coefficient", {}).get("value", "---")))
+
+    def _create_table_item(self, text):
+        """Создает элемент таблицы с выравниванием по центру"""
+        item = QTableWidgetItem(text)
+        item.setTextAlignment(Qt.AlignCenter)
+        return item
+
     def update_polling_period(self):
-        """Обновление периода опроса"""
+        """Обновление периода опроса и интервала обновления"""
         try:
             period = int(self.period_input.text())
             if period <= 0:
                 raise ValueError("Период должен быть положительным числом")
 
-            # Устанавливаем новый период в сервисе опроса
             self.app.polling_service.polling_interval = period
             self._add_log_message(f"Период опроса изменен на {period} сек.")
+
+            # Перезапускаем таймер с новым интервалом
+            if self.update_timer.isActive():
+                self.stop_auto_update()
+                self.start_auto_update()
+
         except ValueError as e:
             QMessageBox.warning(self, "Ошибка", "Период опроса должен быть положительным целым числом")
             self.period_input.setText(str(self.app.polling_service.polling_interval))
@@ -338,7 +470,7 @@ class MeteoMonitor(QWidget):
                 self.is_polling_active = True
                 self.btn_start.setEnabled(False)
                 self.btn_stop.setEnabled(True)
-                # self._add_log_message("Опрос датчиков запущен")
+                self.start_auto_update()  # Запускаем автообновление
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Не удалось запустить опрос: {str(e)}")
 
@@ -346,7 +478,7 @@ class MeteoMonitor(QWidget):
         """Остановка опроса датчиков"""
         if self.is_polling_active:
             try:
-                # Запускаем остановку в отдельном потоке, чтобы не блокировать GUI
+                self.stop_auto_update()  # Останавливаем автообновление
                 Thread(
                     target=self._async_stop_polling,
                     daemon=True
@@ -360,9 +492,8 @@ class MeteoMonitor(QWidget):
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(self.app.stop_polling_service())
-            # self.log_updated.emit("Опрос датчиков остановлен")
             self.is_polling_active = False
-            # Обновляем кнопки в основном потоке через сигнал
+            # Обновляем кнопки в основном потоке
             self.btn_start.setEnabled(True)
             self.btn_stop.setEnabled(False)
         except Exception as e:
@@ -370,36 +501,19 @@ class MeteoMonitor(QWidget):
         finally:
             loop.close()
 
-    def open_edit_dialog(self):
-        """Открытие диалога редактирования"""
-        # self._add_log_message("Открыто окно редактирования")
-        # Создаем и показываем диалоговое окно
-        dialog = EditDialog(self)
-        dialog.exec()
-
-    def update_sensor_data(self, sensor_name, data):
-        """Обновление данных датчика в таблице"""
-        # TODO: Реализовать обновление данных в таблице
-        # data - словарь с значениями параметров
-        pass
-
     def _add_log_message(self, message):
         """Добавление сообщения в лог"""
-        # Ограничиваем количество строк в логе
         max_lines = 1000
         if self.log_text.document().lineCount() > max_lines:
             cursor = self.log_text.textCursor()
             cursor.movePosition(cursor.Start)
             cursor.select(cursor.LineUnderCursor)
             cursor.removeSelectedText()
-            cursor.deleteChar()  # Удаляем символ новой строки
+            cursor.deleteChar()
 
         self.log_text.append(message)
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
-    # ==============================================
-    # ОБРАБОТЧИКИ ПЕРЕМЕЩЕНИЯ ОКНА
-    # ==============================================
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.old_pos = event.globalPosition().toPoint()
@@ -414,9 +528,6 @@ class MeteoMonitor(QWidget):
         self.old_pos = None
 
 
-# ==============================================
-# ЗАПУСК ПРИЛОЖЕНИЯ
-# ==============================================
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MeteoMonitor(app)

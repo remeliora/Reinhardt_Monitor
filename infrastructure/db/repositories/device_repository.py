@@ -1,3 +1,5 @@
+from typing import List, Type
+
 from sqlalchemy.orm import joinedload
 
 from core.model import Device, Threshold
@@ -28,9 +30,9 @@ class DeviceRepository(BaseRepository):
             Device.port == port
         ).first()
 
-    def get_all_devices(self) -> list[Device]:
+    def get_all_devices(self) -> list[Type[Device]]:
         """Получение всех устройств с предзагрузкой связанных данных"""
         return self.session.query(Device).options(
             joinedload(Device.device_type),
             joinedload(Device.thresholds).joinedload(Threshold.parameter)
-        ).all()
+        ).order_by(Device.name).all()

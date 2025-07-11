@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime
 from typing import List, Optional, Dict, Any
+from PySide6.QtCore import Signal, QObject
 
 from core.model import Device, Parameter
 from infrastructure.db.postgres import PostgresDB
@@ -15,8 +16,11 @@ from infrastructure.db.repositories import (
 )
 
 
-class PollingService:
+class PollingService(QObject):
+    data_updated = Signal(str, dict, bool)  # Сигнал: имя устройства, данные, статус is_enable
+
     def __init__(self, db: PostgresDB, polling_interval: int = 15, output_dir: str = "device_data"):
+        super().__init__()
         self.db = db
         self._polling_interval = polling_interval
         self.output_dir = output_dir
@@ -27,7 +31,7 @@ class PollingService:
         self.active_tasks: List[asyncio.Task] = []
         self._is_running = False
         self._polling_task: Optional[asyncio.Task] = None
-        # Убрали создание Event здесь, будем создавать его при запуске
+        self._polling_event: Optional[asyncio.Event] = None
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -38,15 +42,16 @@ class PollingService:
 
     @polling_interval.setter
     def polling_interval(self, value: int):
-        """Установить новый интервал опроса и уведомить цикл опроса"""
+        """Установить новый интервал опроса"""
         if value <= 0:
             raise ValueError("Интервал опроса должен быть положительным числом")
         self._polling_interval = value
-        self._polling_event.set()  # Прерываем sleep для применения нового интервала
+        if self._polling_event:
+            self._polling_event.set()
 
-    async def get_active_devices(self) -> List[Device]:
-        """Получение списка активных устройств из БД"""
-        return self.device_repo.get_devices_by_is_enable_true()
+    async def get_all_devices_with_status(self) -> List[Device]:
+        """Получение всех устройств с их статусом"""
+        return self.device_repo.get_all_devices()
 
     async def get_device_parameters(self, device: Device) -> List[Parameter]:
         """Получение параметров устройства из БД"""
@@ -108,43 +113,34 @@ class PollingService:
                 frame_str = data.decode('latin1').strip()
                 self.logger.debug(f"Получены данные от {device.name}: {frame_str}")
 
-                # Получаем актуальные параметры из БД
+                # Получаем параметры
                 parameters = await self.get_device_parameters(device)
-                parameters_data = []
+                parameters_data = {}
 
-                # Обрабатываем каждый параметр
                 for param in parameters:
                     value = await self.extract_parameter_value(frame_str, param)
                     if value is not None:
                         formatted_value = float(f"{value:.1f}") if param.command == 'DR' else value
-                        # self.logger.info(
-                        #     f"{device.name} | {param.name}: {formatted_value} {param.metric or ''}"
-                        # )
-
-                        param_data = {
-                            "name": param.name,
-                            "command": param.command,
+                        parameters_data[param.name] = {
                             "value": formatted_value,
-                            "metric": param.metric or "",
-                            "timestamp": datetime.now().isoformat()
+                            "metric": param.metric or ""
                         }
-                        parameters_data.append(param_data)
-
                         await self.check_thresholds(device, param, value)
 
-                # Сохраняем данные устройства
+                # Отправляем данные через сигнал
+                self.data_updated.emit(device.name, parameters_data, True)
                 await self.save_device_data(device, parameters_data)
 
             except asyncio.TimeoutError:
                 self.logger.warning(f"Таймаут ожидания данных от {device.name}")
-            except Exception as e:
-                self.logger.error(f"Ошибка чтения данных от {device.name}: {e}")
+                self.data_updated.emit(device.name, {}, True)
             finally:
                 writer.close()
                 await writer.wait_closed()
 
         except Exception as e:
             self.logger.error(f"Ошибка подключения к {device.name}: {e}")
+            self.data_updated.emit(device.name, {"error": str(e)}, False)
 
     async def check_thresholds(self, device: Device, parameter: Parameter, value: float):
         """Проверка выхода значений за пороговые пределы"""
@@ -165,83 +161,21 @@ class PollingService:
             self.logger.error(f"Ошибка проверки порогов для {parameter.name}: {e}")
 
     async def poll_all_devices(self):
-        """Один цикл опроса всех активных устройств"""
-        devices = await self.get_active_devices()
-        # self.logger.info(f"Начинаем опрос {len(devices)} устройств")
+        """Один цикл опроса всех устройств с учетом их статуса"""
+        devices = await self.get_all_devices_with_status()
 
         tasks = []
         for device in devices:
-            task = asyncio.create_task(self.poll_device(device))
-            tasks.append(task)
-            self.active_tasks.append(task)
+            if device.is_enable:
+                task = asyncio.create_task(self.poll_device(device))
+                tasks.append(task)
+                self.active_tasks.append(task)
+            else:
+                self.data_updated.emit(device.name, {}, False)
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self.active_tasks = []
-
-    async def start_polling(self):
-        """Запуск периодического опроса всех устройств"""
-        if self._is_running:
-            self.logger.warning("Опрос уже запущен")
-            return
-
-        self._is_running = True
-        self._polling_event.clear()
-
-        try:
-            while self._is_running:
-                start_time = datetime.now()
-                await self.poll_all_devices()
-
-                # Рассчитываем время до следующего опроса
-                elapsed = (datetime.now() - start_time).total_seconds()
-                sleep_time = max(0, self.polling_interval - elapsed)
-
-                try:
-                    # Используем событие для прерывания sleep при изменении интервала
-                    await asyncio.wait_for(self._polling_event.wait(), timeout=sleep_time)
-                    self._polling_event.clear()  # Сбрасываем событие для следующего цикла
-                except asyncio.TimeoutError:
-                    pass  # Нормальное завершение sleep
-
-        except asyncio.CancelledError:
-            self.logger.info("Получен запрос на остановку опроса...")
-        except Exception as e:
-            self.logger.error(f"Критическая ошибка: {e}")
-            raise
-        finally:
-            self._is_running = False
-            # Отменяем все активные задачи
-            await self.stop_polling()
-            self.logger.info("Опрос полностью остановлен")
-
-    async def stop_polling(self):
-        """Корректная остановка опроса"""
-        self._is_running = False
-        self._polling_event.set()  # Прерываем sleep
-
-        # Отменяем все активные задачи
-        for task in self.active_tasks:
-            if not task.done():
-                task.cancel()
-
-        # Дожидаемся завершения всех задач
-        if self.active_tasks:
-            try:
-                await asyncio.gather(*self.active_tasks)
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                self.logger.error(f"Ошибка при отмене задач: {e}")
-            finally:
-                self.active_tasks = []
-
-        # Отменяем основную задачу опроса
-        if self._polling_task and not self._polling_task.done():
-            self._polling_task.cancel()
-            try:
-                await self._polling_task
-            except asyncio.CancelledError:
-                pass
 
     async def run(self):
         """Запуск периодического опроса всех устройств"""
@@ -250,7 +184,7 @@ class PollingService:
             return
 
         self._is_running = True
-        self._polling_event = asyncio.Event()  # Создаем новый Event для текущего loop
+        self._polling_event = asyncio.Event()
         self._polling_event.clear()
 
         try:
@@ -277,9 +211,39 @@ class PollingService:
             await self.stop_polling()
             self.logger.info("Опрос полностью остановлен")
 
+    async def stop_polling(self):
+        """Корректная остановка опроса"""
+        self._is_running = False
+        if self._polling_event:
+            self._polling_event.set()
+
+        # Отменяем все активные задачи
+        for task in self.active_tasks:
+            if not task.done():
+                task.cancel()
+
+        # Дожидаемся завершения всех задач
+        if self.active_tasks:
+            try:
+                await asyncio.gather(*self.active_tasks)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                self.logger.error(f"Ошибка при отмене задач: {e}")
+            finally:
+                self.active_tasks = []
+
+        # Отменяем основную задачу опроса
+        if self._polling_task and not self._polling_task.done():
+            self._polling_task.cancel()
+            try:
+                await self._polling_task
+            except asyncio.CancelledError:
+                pass
+
     async def cleanup(self):
         """Очистка ресурсов"""
-        self._is_running = False
+        await self.stop_polling()
         if hasattr(self, '_polling_event'):
             del self._polling_event
         if self._polling_task and not self._polling_task.done():
