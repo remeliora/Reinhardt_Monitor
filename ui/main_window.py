@@ -168,6 +168,10 @@ class MeteoMonitor(QWidget):
         # Центральная панель (таблица и лог)
         self.init_center_panel(content_layout)
 
+        self.is_polling_active = True
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+
     def init_left_panel(self, parent_layout):
         """Инициализация левой панели с кнопками"""
         left_panel = QWidget()
@@ -180,7 +184,6 @@ class MeteoMonitor(QWidget):
         self.btn_edit = self._create_menu_button("Редактировать")
         self.btn_start = self._create_menu_button("Запустить опрос")
         self.btn_stop = self._create_menu_button("Остановить опрос")
-        self.btn_stop.setEnabled(False)
 
         # Подключение событий
         self.btn_edit.clicked.connect(self.open_edit_dialog)
