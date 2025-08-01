@@ -117,7 +117,7 @@ class MeteoMonitor(QWidget):
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.old_pos = None
-        self.is_polling_active = False
+        self.is_polling_active = True
         self.update_timer = QTimer(self)  # Таймер для автоматического обновления
 
         # Инициализация UI
@@ -168,9 +168,14 @@ class MeteoMonitor(QWidget):
         # Центральная панель (таблица и лог)
         self.init_center_panel(content_layout)
 
-        self.is_polling_active = True
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
+        # Устанавливаем начальные состояния кнопок
+        self.update_button_states(True)  # True, так как опрос запускается автоматически
+
+    def update_button_states(self, is_polling_active):
+        """Обновляет состояния кнопок в зависимости от статуса опроса"""
+        self.btn_start.setEnabled(not is_polling_active)
+        self.btn_stop.setEnabled(is_polling_active)
+        self.is_polling_active = is_polling_active
 
     def init_left_panel(self, parent_layout):
         """Инициализация левой панели с кнопками"""
@@ -470,9 +475,7 @@ class MeteoMonitor(QWidget):
         if not self.is_polling_active:
             try:
                 self.app.run_polling_service()
-                self.is_polling_active = True
-                self.btn_start.setEnabled(False)
-                self.btn_stop.setEnabled(True)
+                self.update_button_states(True)  # Обновляем состояния кнопок
                 self.start_auto_update()  # Запускаем автообновление
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Не удалось запустить опрос: {str(e)}")
@@ -495,10 +498,8 @@ class MeteoMonitor(QWidget):
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(self.app.stop_polling_service())
-            self.is_polling_active = False
             # Обновляем кнопки в основном потоке
-            self.btn_start.setEnabled(True)
-            self.btn_stop.setEnabled(False)
+            self.update_button_states(False)
         except Exception as e:
             self.log_updated.emit(f"Ошибка при остановке опроса: {str(e)}")
         finally:

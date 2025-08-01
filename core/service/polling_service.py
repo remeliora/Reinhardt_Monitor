@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime
 from typing import List, Optional, Dict, Any
+
 from PySide6.QtCore import Signal, QObject
 
 from core.model import Device, Parameter
@@ -32,6 +33,7 @@ class PollingService(QObject):
         self._is_running = False
         self._polling_task: Optional[asyncio.Task] = None
         self._polling_event: Optional[asyncio.Event] = None
+        self._tasks_lock = asyncio.Lock()  # Для синхронизации доступа к active_tasks
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -134,9 +136,18 @@ class PollingService(QObject):
             except asyncio.TimeoutError:
                 self.logger.warning(f"Таймаут ожидания данных от {device.name}")
                 self.data_updated.emit(device.name, {}, True)
+            except asyncio.CancelledError:
+                self.logger.debug(f"Опрос устройства {device.name} отменен")
+                raise
+            except Exception as e:
+                self.logger.error(f"Ошибка при опросе устройства {device.name}: {e}")
+                self.data_updated.emit(device.name, {"error": str(e)}, False)
             finally:
                 writer.close()
-                await writer.wait_closed()
+                try:
+                    await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    self.logger.warning(f"Таймаут при закрытии соединения с {device.name}")
 
         except Exception as e:
             self.logger.error(f"Ошибка подключения к {device.name}: {e}")
@@ -162,20 +173,26 @@ class PollingService(QObject):
 
     async def poll_all_devices(self):
         """Один цикл опроса всех устройств с учетом их статуса"""
-        devices = await self.get_all_devices_with_status()
+        try:
+            devices = await self.get_all_devices_with_status()
+            tasks = []
 
-        tasks = []
-        for device in devices:
-            if device.is_enable:
-                task = asyncio.create_task(self.poll_device(device))
-                tasks.append(task)
-                self.active_tasks.append(task)
-            else:
-                self.data_updated.emit(device.name, {}, False)
+            for device in devices:
+                if device.is_enable:
+                    task = asyncio.create_task(self.poll_device(device))
+                    tasks.append(task)
+                    async with self._tasks_lock:
+                        self.active_tasks.append(task)
+                else:
+                    self.data_updated.emit(device.name, {}, False)
 
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self.active_tasks = []
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            self.logger.error(f"Ошибка при опросе устройств: {e}")
+        finally:
+            async with self._tasks_lock:
+                self.active_tasks = []
 
     async def run(self):
         """Запуск периодического опроса всех устройств"""
@@ -183,9 +200,14 @@ class PollingService(QObject):
             self.logger.warning("Опрос уже запущен")
             return
 
+        if self._polling_task is not None and not self._polling_task.done():
+            self.logger.warning("Предыдущая задача опроса еще не завершена")
+            return
+
         self._is_running = True
         self._polling_event = asyncio.Event()
         self._polling_event.clear()
+        self._polling_task = asyncio.current_task()
 
         try:
             while self._is_running:
@@ -204,47 +226,43 @@ class PollingService(QObject):
         except asyncio.CancelledError:
             self.logger.info("Получен запрос на остановку опроса...")
         except Exception as e:
-            self.logger.error(f"Критическая ошибка: {e}")
+            self.logger.error(f"Критическая ошибка в цикле опроса: {e}")
             raise
         finally:
             self._is_running = False
-            await self.stop_polling()
+            self._polling_task = None
             self.logger.info("Опрос полностью остановлен")
 
     async def stop_polling(self):
         """Корректная остановка опроса"""
+        if not self._is_running:
+            return
+
         self._is_running = False
+
         if self._polling_event:
             self._polling_event.set()
 
-        # Отменяем все активные задачи
-        for task in self.active_tasks:
-            if not task.done():
-                task.cancel()
+        async with self._tasks_lock:
+            current_tasks = list(self.active_tasks)
+            self.active_tasks = []
 
-        # Дожидаемся завершения всех задач
-        if self.active_tasks:
+        if current_tasks:
             try:
-                await asyncio.gather(*self.active_tasks)
-            except asyncio.CancelledError:
-                pass
+                await asyncio.gather(*[task.cancel() for task in current_tasks if not task.done()],
+                                   return_exceptions=True)
             except Exception as e:
-                self.logger.error(f"Ошибка при отмене задач: {e}")
-            finally:
-                self.active_tasks = []
+                self.logger.debug(f"Ошибка при отмене задач: {e}")
 
-        # Отменяем основную задачу опроса
-        if self._polling_task and not self._polling_task.done():
+        if self._polling_task is not None and not self._polling_task.done():
             self._polling_task.cancel()
             try:
                 await self._polling_task
-            except asyncio.CancelledError:
-                pass
+            except (asyncio.CancelledError, Exception) as e:
+                self.logger.debug(f"Ошибка при отмене основной задачи: {e}")
 
     async def cleanup(self):
         """Очистка ресурсов"""
         await self.stop_polling()
-        if hasattr(self, '_polling_event'):
-            del self._polling_event
-        if self._polling_task and not self._polling_task.done():
-            self._polling_task.cancel()
+        if hasattr(self, '_polling_event') and self._polling_event is not None:
+            self._polling_event = None

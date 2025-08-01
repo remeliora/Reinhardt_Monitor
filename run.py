@@ -232,14 +232,14 @@ class Application:
         if not self.initialize_polling_service():
             return
 
+        # Запускаем сервис опроса ДО инициализации GUI
+        self.run_polling_service()
+
         # Инициализируем GUI
         self.initialize_gui()
 
         # Показываем главное окно
         self.gui.show()
-
-        # Запускаем сервис опроса
-        self.run_polling_service()
 
         # Запускаем цикл событий
         sys.exit(self.app.exec())
